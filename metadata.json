@@ -1,0 +1,6 @@
+{
+  "name": "GitSync AI",
+  "description": "Tracks daily GitHub activity, audits portfolio content using Vision/LLM, and automates commit updates via GitHub Actions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
