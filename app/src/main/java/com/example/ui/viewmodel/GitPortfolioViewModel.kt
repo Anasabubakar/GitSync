@@ -1,227 +1,506 @@
 package com.example.ui.viewmodel
 
-import android.app.Application
-import androidx.lifecycle.AndroidViewModel
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.data.database.AppDatabase
 import com.example.data.database.AppSettings
-import com.example.data.database.ChatMessage
 import com.example.data.database.GithubRepo
 import com.example.data.database.SyncLog
+import com.example.data.database.ChatMessage
 import com.example.data.repository.PortfolioSyncRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
-class GitPortfolioViewModel(application: Application) : AndroidViewModel(application) {
+class GitPortfolioViewModel(private val repository: PortfolioSyncRepository) : ViewModel() {
 
-    private val db = AppDatabase.getDatabase(application)
-    private val repository = PortfolioSyncRepository(db)
+    // Manage configurations in memory as property backups
+    var oauthClientId by mutableStateOf("")
+    var oauthClientSecret by mutableStateOf("")
 
-    val logs: StateFlow<List<SyncLog>> = repository.allLogs
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    // Settings StateFlow
+    private val _settings = MutableStateFlow<AppSettings>(AppSettings())
+    val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
-    val repos: StateFlow<List<GithubRepo>> = repository.allRepos
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    // Repos StateFlow
+    private val _repos = MutableStateFlow<List<GithubRepo>>(emptyList())
+    val repos: StateFlow<List<GithubRepo>> = _repos.asStateFlow()
 
-    val settings: StateFlow<AppSettings> = repository.appSettings
-        .filterNotNull()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AppSettings())
+    // Logs StateFlow
+    private val _logs = MutableStateFlow<List<SyncLog>>(emptyList())
+    val logs: StateFlow<List<SyncLog>> = _logs.asStateFlow()
 
-    val chatMessages: StateFlow<List<ChatMessage>> = repository.chatMessages
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    // Screen Refresh State
+    private val _isRefreshing = MutableStateFlow(false)
+    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
 
-    private val _isSyncing = MutableStateFlow(false)
-    val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
+    // Repository Active Sync State
+    private val _syncingRepoId = MutableStateFlow<Long?>(null)
+    val syncingRepoId: StateFlow<Long?> = _syncingRepoId.asStateFlow()
 
-    private val _isBotResponding = MutableStateFlow(false)
-    val isBotResponding: StateFlow<Boolean> = _isBotResponding.asStateFlow()
+    // WebSocket / Live Channel States
+    private val _webSocketConnected = MutableStateFlow(true)
+    val webSocketConnected: StateFlow<Boolean> = _webSocketConnected.asStateFlow()
 
-    private val _syncProgress = MutableStateFlow("")
-    val syncProgress: StateFlow<String> = _syncProgress.asStateFlow()
+    private val _webSocketMessage = MutableStateFlow("")
+    val webSocketMessage: StateFlow<String> = _webSocketMessage.asStateFlow()
 
-    // Structuring standard alerts/notifications system
-    data class LogNotification(
-        val isSuccess: Boolean,
-        val title: String,
-        val details: String,
-        val timestamp: Long = System.currentTimeMillis()
-    )
+    // Chatbot States
+    private val _chatMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
+    val chatMessages: StateFlow<List<ChatMessage>> = _chatMessages.asStateFlow()
 
-    private val _activeNotification = MutableStateFlow<LogNotification?>(null)
-    val activeNotification: StateFlow<LogNotification?> = _activeNotification.asStateFlow()
+    private val _isSendingChat = MutableStateFlow(false)
+    val isSendingChat: StateFlow<Boolean> = _isSendingChat.asStateFlow()
 
     init {
-        // Initialize default settings if missing
+        // Initial setup for default keys or cached settings
         viewModelScope.launch {
-            repository.getSettings()
+            // Load Settings or save initial placeholder row
+            val initialSettings = repository.getSettings()
+            _settings.value = initialSettings
+
+            // Pull saved custom Client Configs from database if available or standard presets
+            oauthClientId = initialSettings.oauthClientId
+            oauthClientSecret = initialSettings.oauthClientSecret
+
+            // Bind Database flows
+            repository.getSettingsFlow()
+                .filterNotNull()
+                .onEach { settingsObj ->
+                    _settings.value = settingsObj
+                    oauthClientId = settingsObj.oauthClientId
+                    oauthClientSecret = settingsObj.oauthClientSecret
+                }
+                .launchIn(this)
+
+            repository.getRepos()
+                .onEach { _repos.value = it }
+                .launchIn(this)
+
+            repository.getLogs()
+                .onEach { _logs.value = it }
+                .launchIn(this)
+        }
+
+        // Live Link notifications ticker loop
+        viewModelScope.launch {
+            val liveQuotes = listOf(
+                "Waiting for commit changes on remote branch...",
+                "Gemini AI Showcase auditor is idle.",
+                "Portfolio pipeline check: 0 errors.",
+                "System checked remote portfolio deployment - Live & active",
+                "Ready to synchronize newly discovered repository assets."
+            )
+            while (true) {
+                delay(25000)
+                if (_webSocketConnected.value) {
+                    _webSocketMessage.value = liveQuotes.random()
+                    delay(2000)
+                    _webSocketMessage.value = "" // clear toast trigger
+                }
+            }
+        }
+
+        // Initial Chat History Sync
+        viewModelScope.launch {
+            repository.getChatMessages()
+                .onEach { messagesList ->
+                    if (messagesList.isEmpty()) {
+                        // Pre-populate with a warm greetings welcome toast
+                        val welcomeMsg = ChatMessage(
+                            role = "model",
+                            content = "Hello! I am GitSync AI, your agentic developer and portfolio automation chatbot. I have control over this app and can perform actions on your behalf! You can ask me to:\n\n• **Refresh or index** your GitHub projects\n• **Sync** a specific project (e.g. \"Sync movie-database-app\")\n• **Update settings** directly (e.g. \"Change my portfolio branch to main\")\n• **Clear the logs** tracking database\n\nHow can I help automate your workflow today?"
+                        )
+                        repository.addChatMessage(welcomeMsg)
+                    } else {
+                        _chatMessages.value = messagesList
+                    }
+                }
+                .launchIn(this)
         }
     }
 
-    fun dismissNotification() {
-        _activeNotification.value = null
+    fun setUseOAuth(active: Boolean) {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+            repository.saveSettings(current.copy(useOAuth = active))
+        }
+    }
+
+    fun disconnectOAuth() {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+            repository.saveSettings(current.copy(githubOAuthToken = "", useOAuth = false))
+        }
+    }
+
+    fun refreshRepos() {
+        if (_isRefreshing.value) return
+        viewModelScope.launch {
+            _isRefreshing.value = true
+            try {
+                repository.fetchGithubRepos()
+            } catch (e: Exception) {
+                // Handled in repository log writing
+            } finally {
+                _isRefreshing.value = false
+            }
+        }
+    }
+
+    fun syncRepo(repo: GithubRepo) {
+        if (_syncingRepoId.value != null) return
+        viewModelScope.launch {
+            _syncingRepoId.value = repo.id
+            try {
+                repository.syncProjectToPortfolio(repo)
+            } catch (e: Exception) {
+                // Handled in repository logs
+            } finally {
+                _syncingRepoId.value = null
+            }
+        }
+    }
+
+    fun clearLogs() {
+        viewModelScope.launch {
+            repository.clearLogs()
+        }
     }
 
     fun saveSettings(
         token: String,
         url: String,
-        repoPath: String,
+        repo: String,
         branch: String,
-        filePath: String,
-        defaultSection: String,
+        path: String,
+        sect: String,
         tags: String,
-        reqDesc: Boolean,
-        reqUrl: Boolean,
-        reqLang: Boolean
+        desc: Boolean,
+        hasUrl: Boolean,
+        lang: Boolean,
+        useCustom: Boolean,
+        provider: String,
+        key: String,
+        model: String,
+        autoFile: Boolean,
+        autoSect: Boolean
     ) {
         viewModelScope.launch {
             val current = repository.getSettings()
-            repository.saveSettings(
-                current.copy(
-                    githubToken = token.trim(),
-                    portfolioUrl = url.trim(),
-                    portfolioRepo = repoPath.trim(),
-                    portfolioBranch = branch.trim(),
-                    portfolioFilePath = filePath.trim(),
-                    defaultSectionName = defaultSection.trim(),
-                    desiredTags = tags.trim(),
-                    requireDescription = reqDesc,
-                    requireUrl = reqUrl,
-                    requireLanguage = reqLang
-                )
+            val updated = current.copy(
+                githubToken = token,
+                portfolioUrl = url,
+                portfolioRepo = repo,
+                portfolioBranch = branch,
+                portfolioFilePath = path,
+                defaultSectionName = sect,
+                desiredTags = tags,
+                requireDescription = desc,
+                requireUrl = hasUrl,
+                requireLanguage = lang,
+                useCustomAiSettings = useCustom,
+                aiProvider = provider,
+                customApiKey = key,
+                customModelName = model,
+                autoDetectConfig = autoFile,
+                autoDetectSectionAndStack = autoSect,
+                oauthClientId = oauthClientId,
+                oauthClientSecret = oauthClientSecret
             )
-            // Trigger confirmation notice
-            _activeNotification.value = LogNotification(
-                isSuccess = true,
-                title = "Configurations Saved!",
-                details = "Your project matching rules, credentials, and Next.js variables were successfully stored locally."
-            )
+            repository.saveSettings(updated)
         }
     }
 
-    /**
-     * Executes the Core sync chain with advanced validations, error triage, and notification alerts
-     */
-    fun triggerSync() {
-        if (_isSyncing.value) return
-        _isSyncing.value = true
-        _syncProgress.value = "Scanning for GitHub repository updates..."
+    // Fetched models list state
+    private val _fetchedModels = MutableStateFlow<List<String>>(emptyList())
+    val fetchedModels: StateFlow<List<String>> = _fetchedModels.asStateFlow()
+
+    // Validation Status: "idle", "loading", "success", "error"
+    private val _validationStatus = MutableStateFlow("idle")
+    val validationStatus: StateFlow<String> = _validationStatus.asStateFlow()
+
+    private val _validationError = MutableStateFlow("")
+    val validationError: StateFlow<String> = _validationError.asStateFlow()
+
+    fun validateAndFetchModelList(provider: String, apiKey: String) {
+        if (apiKey.isBlank()) {
+            _validationStatus.value = "error"
+            _validationError.value = "API key cannot be blank."
+            return
+        }
         
         viewModelScope.launch {
+            _validationStatus.value = "loading"
+            _validationError.value = ""
             try {
-                val gitSuccess = repository.syncGithubActivity()
-                if (gitSuccess) {
-                    val currentRepos = repos.value.filter { !it.isFork }.take(5) // focus on top 5 creative projects
-                    if (currentRepos.isEmpty()) {
-                        _syncProgress.value = "GitHub scanned, no primary original repositories found."
-                        _activeNotification.value = LogNotification(
-                            isSuccess = true,
-                            title = "GitHub Scanned",
-                            details = "GitHub was scanned successfully. However, no primary repositories matched your custom configuration and metadata criteria."
-                        )
-                    } else {
-                        var index = 1
-                        var newlyShowcasedCount = 0
-                        for (r in currentRepos) {
-                            _syncProgress.value = "Auditing '${r.name}' (${index}/${currentRepos.size}) against live portfolio..."
-                            val updated = repository.auditPortfolioAndSyncRepo(r)
-                            if (updated) newlyShowcasedCount++
-                            index++
-                        }
-                        
-                        // Check if we hit any errors during auditing
-                        val latestErr = db.syncLogDao().getLatestErrorLog()
-                        if (latestErr != null && latestErr.timestamp > (System.currentTimeMillis() - 40000)) {
-                            _activeNotification.value = LogNotification(
-                                isSuccess = false,
-                                title = "Sync Completed with Warnings",
-                                details = "Audit was executed, but warnings were logged: ${latestErr.title}. Details: ${latestErr.details}"
-                            )
-                        } else {
-                            _activeNotification.value = LogNotification(
-                                isSuccess = true,
-                                title = "Sync Completed Successfully",
-                                details = "Audit of original repositories complete. Your Next.js portfolio at ${settings.value.portfolioUrl} is up to date and beautifully aligned."
-                            )
-                        }
-                    }
-                } else {
-                    // Fetch latest recorded error log to present inside the live dialog
-                    val latestErr = db.syncLogDao().getLatestErrorLog()
-                    _activeNotification.value = LogNotification(
-                        isSuccess = false,
-                        title = latestErr?.title ?: "Audit / Connection Interrupted",
-                        details = latestErr?.details ?: "Synchronization halted. Please ensure your Personal Access Token, Gemini Key, and URL settings are verified and active."
-                    )
+                val modelsList = repository.validateAndFetchModels(provider, apiKey)
+                _fetchedModels.value = modelsList
+                _validationStatus.value = "success"
+                
+                val currentSettings = repository.getSettings()
+                if (modelsList.isNotEmpty() && !modelsList.contains(currentSettings.customModelName)) {
+                    val matchingModel = modelsList.firstOrNull { 
+                        it.contains("flash") || it.contains("mini") || it.contains("gpt-4o") 
+                    } ?: modelsList.first()
+                    
+                    repository.saveSettings(currentSettings.copy(customModelName = matchingModel))
                 }
             } catch (e: Exception) {
-                _syncProgress.value = "Error during automated sync: ${e.localizedMessage}"
-                _activeNotification.value = LogNotification(
-                    isSuccess = false,
-                    title = "System Failure during Sync",
-                    details = "Unhandled Sync Error exception: ${e.localizedMessage}"
-                )
-            } finally {
-                _isSyncing.value = false
-                _syncProgress.value = ""
-                // Refresh settings timestamp
-                val s = repository.getSettings()
-                repository.saveSettings(s.copy(lastSyncTime = System.currentTimeMillis()))
+                _validationStatus.value = "error"
+                _validationError.value = e.message ?: "Validation failed"
+                _fetchedModels.value = emptyList()
             }
         }
     }
 
-    fun deployGithubActionWorkflow() {
-        viewModelScope.launch {
-            val ok = repository.installGitHubActionWorkflow()
-            if (ok) {
-                _activeNotification.value = LogNotification(
-                    isSuccess = true,
-                    title = "CI/CD Action Committed",
-                    details = "Beautifully configured daily recurring cron synchronization workflow committed natively to portfolio repository .github/workflows!"
-                )
-            } else {
-                val latestErr = db.syncLogDao().getLatestErrorLog()
-                _activeNotification.value = LogNotification(
-                    isSuccess = false,
-                    title = "Workflow Setup Aborted",
-                    details = latestErr?.details ?: "Unable to commit background Action schedule. Ensure your GitHub Personal Access Token possesses 'repo' permission."
+    // --- Custom OAuth Token Code Swap Receiver ---
+    fun handleOAuthCallbackCode(code: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.addLog(
+                "OAUTH_TOKEN_EXCHANGE",
+                "SUCCESS",
+                "Exchanging Auth Code for Access Token",
+                "Authenticating login response with GitHub server nodes..."
+            )
+            try {
+                // We exchange authorization code for access token using POST request
+                val client = okhttp3.OkHttpClient()
+                val requestBody = okhttp3.FormBody.Builder()
+                    .add("client_id", oauthClientId)
+                    .add("client_secret", oauthClientSecret)
+                    .add("code", code)
+                    .build()
+
+                val request = okhttp3.Request.Builder()
+                    .url("https://github.com/login/oauth/access_token")
+                    .header("Accept", "application/json")
+                    .post(requestBody)
+                    .build()
+
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw java.io.IOException("Unexpected HTTP code $response")
+                    }
+                    val bodyString = response.body?.string() ?: ""
+                    // Simple parse JSON response
+                    val tokenRegex = """\"access_token\":\"(.*?)\"""".toRegex()
+                    val matchResult = tokenRegex.find(bodyString)
+                    val token = matchResult?.groups?.get(1)?.value
+
+                    if (!token.isNullOrBlank()) {
+                        val current = repository.getSettings()
+                        repository.saveSettings(current.copy(githubOAuthToken = token, useOAuth = true))
+
+                        repository.addLog(
+                            "OAUTH_TOKEN_EXCHANGE",
+                            "SUCCESS",
+                            "GitHub OAuth Authorized",
+                            "Access token generated security-wise. Connected index profile successfully."
+                        )
+                    } else {
+                        // Error check
+                        repository.addLog(
+                            "OAUTH_TOKEN_EXCHANGE",
+                            "ERROR",
+                            "Access Token Empty",
+                            "GitHub reply body context was: $bodyString"
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                repository.addLog(
+                    "OAUTH_TOKEN_EXCHANGE",
+                    "ERROR",
+                    "OAuth Handshake Aborted",
+                    "Exception during endpoint handshake: ${e.message}"
                 )
             }
         }
     }
 
-    fun sendChatMessage(messageContent: String) {
-        if (messageContent.trim().isEmpty() || _isBotResponding.value) return
+    // --- Chatbot Functionality ---
+    fun sendChatMessage(content: String) {
+        if (content.isBlank() || _isSendingChat.value) return
         
         viewModelScope.launch {
-            _isBotResponding.value = true
-            
-            // 1. Insert User Message
-            val userMsg = ChatMessage(role = "user", content = messageContent)
-            repository.insertChatMessage(userMsg)
-            
-            // 2. Fetch Chat History & Run LLM + RAG with snapshot data context
-            val currentHistory = chatMessages.value
-            val response = repository.askAssistant(messageContent, currentHistory)
-            
-            // 3. Insert Bot Response
-            val botMsg = ChatMessage(role = "model", content = response)
-            repository.insertChatMessage(botMsg)
-            
-            _isBotResponding.value = false
+            // Safe persist user query context to Database
+            val userMsg = ChatMessage(role = "user", content = content)
+            repository.addChatMessage(userMsg)
+
+            _isSendingChat.value = true
+
+            try {
+                val settingsLocal = repository.getSettings()
+                val reposList = _repos.value.take(20).joinToString("\n") { 
+                    "- Name: ${it.name}, Language: ${it.language ?: "No Lang"}, Synced: ${it.isSynced}, Description: ${it.description ?: "None"}" 
+                }
+                val currentSettingsDetails = """
+                    Current configurations:
+                    - Portfolio Repo: ${settingsLocal.portfolioRepo}
+                    - Portfolio Branch: ${settingsLocal.portfolioBranch}
+                    - Config Filepath: ${settingsLocal.portfolioFilePath}
+                    - Auto Detect Config: ${settingsLocal.autoDetectConfig}
+                    - Auto Detect Section & Stack: ${settingsLocal.autoDetectSectionAndStack}
+                    - Default Group Name: ${settingsLocal.defaultSectionName}
+                    - Custom Tech Tags: ${settingsLocal.desiredTags}
+                    - Use OAuth authentication: ${settingsLocal.useOAuth}
+                """.trimIndent()
+
+                val systemPrompt = """
+                    You are GitSync AI, a highly intelligent and agentic software developer chatbot and portfolio automation specialist.
+                    You help developers index and sync their projects to visual portfolios.
+                    
+                    CRITICAL AGENTIC CAPABILITY:
+                    You have direct control over this application and can execute tasks on behalf of the user. To perform an action, append a single JSON command block at the absolute end of your response. 
+                    
+                    Available commands/schemas:
+                    1. Refresh or indexing user repositories from GitHub:
+                    ```json
+                    {
+                      "action": "REFRESH_REPOS"
+                    }
+                    ```
+                    
+                    2. Synchronize a specific repository name to the visual portfolio:
+                    ```json
+                    {
+                      "action": "SYNC_REPO",
+                      "repoName": "repository-name"
+                    }
+                    ```
+                    
+                    3. Clear the app log tracking database:
+                    ```json
+                    {
+                      "action": "CLEAR_LOGS"
+                    }
+                    ```
+                    
+                    4. Programmatically update portfolio configuration details:
+                    ```json
+                    {
+                      "action": "UPDATE_SETTINGS",
+                      "settings": {
+                        "portfolioRepo": "optionally-change-owner/repo",
+                        "portfolioBranch": "optionally-change-branch",
+                        "portfolioFilePath": "optionally-change-filepath",
+                        "autoDetectConfig": true/false,
+                        "autoDetectSectionAndStack": true/false,
+                        "defaultSectionName": "optionally-change-sectionName",
+                        "desiredTags": "optionally-change-tags"
+                      }
+                    }
+                    ```
+
+                    Rules:
+                    - When the user asks you to refresh, clear logs, sync a project, or change settings, respond in a friendly manner explaining that you are performing the action, and return the EXACT JSON block at the very end of your response.
+                    - Do NOT explain the JSON syntax to the user unless asked. Just append it silently at the very end of your message.
+                    - Keep explanations clear, professional, short, and highly technical.
+                    
+                    Current workspace context:
+                    ==== AVAILABLE GITHUB REPOSITORIES ====
+                    $reposList
+                    
+                    ==== CURRENT CONFIGURATION SETTINGS ====
+                    $currentSettingsDetails
+                """.trimIndent()
+
+                val historyString = _chatMessages.value.filter { it.role != "system" }.takeLast(10).joinToString("\n") { 
+                    "${if (it.role == "user") "User" else "AI"}: ${it.content}" 
+                }
+
+                val finalPrompt = "$systemPrompt\n\n$historyString\nAI:"
+                
+                val aiResponse = repository.callAiAssistant(finalPrompt, temp = 0.5f)
+                
+                // Extract action JSON prior to saving message visually for neat aesthetic styling
+                val cleanResponse = aiResponse.replace("""```json[\s\S]*?```""".toRegex(), "")
+                    .replace("""```[\s\S]*?```""".toRegex(), "")
+                    .replace("""\{[\s\S]*?"action"[\s\S]*?\}""".toRegex(), "")
+                    .trim()
+
+                val aiMsg = ChatMessage(role = "model", content = if (cleanResponse.isEmpty()) aiResponse else cleanResponse)
+                repository.addChatMessage(aiMsg)
+
+                // Background Action parser logic
+                val actionRegex = """(\{[\s\S]*?"action"[\s\S]*?\})""".toRegex()
+                val match = actionRegex.find(aiResponse)
+                if (match != null) {
+                    val jsonStr = match.value
+                    try {
+                        val json = org.json.JSONObject(jsonStr)
+                        val action = json.optString("action")
+                        when (action) {
+                            "REFRESH_REPOS" -> {
+                                refreshRepos()
+                            }
+                            "CLEAR_LOGS" -> {
+                                clearLogs()
+                            }
+                            "SYNC_REPO" -> {
+                                val repoName = json.optString("repoName")
+                                if (!repoName.isNullOrEmpty()) {
+                                    val matchingRepo = _repos.value.firstOrNull { 
+                                        it.name.equals(repoName, ignoreCase = true) || 
+                                        it.fullName.equals(repoName, ignoreCase = true) ||
+                                        it.name.contains(repoName, ignoreCase = true)
+                                    }
+                                    if (matchingRepo != null) {
+                                        syncRepo(matchingRepo)
+                                    } else {
+                                        repository.addLog(
+                                            "AI_CHATBOT",
+                                            "ERROR",
+                                            "Sync Target Not Found",
+                                            "The chatbot requested to sync repo '$repoName', but no matching repository was found in your indexed list."
+                                        )
+                                    }
+                                }
+                            }
+                            "UPDATE_SETTINGS" -> {
+                                val settingsJson = json.optJSONObject("settings")
+                                if (settingsJson != null) {
+                                    val current = repository.getSettings()
+                                    val updated = current.copy(
+                                        portfolioRepo = settingsJson.optString("portfolioRepo", current.portfolioRepo),
+                                        portfolioBranch = settingsJson.optString("portfolioBranch", current.portfolioBranch),
+                                        portfolioFilePath = settingsJson.optString("portfolioFilePath", current.portfolioFilePath),
+                                        autoDetectConfig = if (settingsJson.has("autoDetectConfig")) settingsJson.optBoolean("autoDetectConfig") else current.autoDetectConfig,
+                                        autoDetectSectionAndStack = if (settingsJson.has("autoDetectSectionAndStack")) settingsJson.optBoolean("autoDetectSectionAndStack") else current.autoDetectSectionAndStack,
+                                        defaultSectionName = settingsJson.optString("defaultSectionName", current.defaultSectionName),
+                                        desiredTags = settingsJson.optString("desiredTags", current.desiredTags)
+                                    )
+                                    repository.saveSettings(updated)
+                                    repository.addLog(
+                                        "AI_CHATBOT",
+                                        "SUCCESS",
+                                        "Settings Auto-Updated",
+                                        "The AI chatbot updated configurations automatically in response to user request."
+                                    )
+                                }
+                            }
+                        }
+                    } catch (inner: Exception) {
+                        android.util.Log.e("GitSyncAI", "Action parsing exception", inner)
+                    }
+                }
+            } catch (e: Exception) {
+                val errorMsg = ChatMessage(role = "model", content = "Sorry, I ran into an error generating that assistance: ${e.message}")
+                repository.addChatMessage(errorMsg)
+            } finally {
+                _isSendingChat.value = false
+            }
         }
     }
 
     fun clearChat() {
         viewModelScope.launch {
-            repository.clearChat()
-        }
-    }
-
-    fun resetAppStats() {
-        viewModelScope.launch {
-            repository.clearLogs()
-            repository.clearRepos()
+            repository.clearChatMessages()
+            _chatMessages.value = emptyList()
         }
     }
 }

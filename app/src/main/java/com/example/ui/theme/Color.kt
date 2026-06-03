@@ -2,22 +2,17 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val VibrantBackground = Color(0xFFFEF7FF)
-val VibrantText = Color(0xFF1D1B20)
-val VibrantPrimary = Color(0xFF6750A4)
-val VibrantOnPrimary = Color(0xFFFFFFFF)
-val VibrantPrimaryContainer = Color(0xFFEADDFF)
-val VibrantOnPrimaryContainer = Color(0xFF21005D)
-val VibrantSecondaryContainer = Color(0xFFF3EDF7)
-val VibrantOnSecondaryContainer = Color(0xFF49454F)
-val VibrantBorder = Color(0xFFCAC4D0)
-val VibrantError = Color(0xFFB3261E)
+// Premium Light SaaS-grade Palette
+val LightBg = Color(0xFFF8FAFC)        // Elegant Slate-White Canvas
+val LightCard = Color(0xFFFFFFFF)      // Pure White Glass-finished Card
+val PrimaryNeon = Color(0xFF2563EB)    // Radiant Royal Blue Accent
+val SecondaryCyan = Color(0xFF0EA5E9)  // Sky Cyan Secondary
+val AccentAccent = Color(0xFF7C3AED)   // Orchid Violet Highlight
 
-val Purple80 = Color(0xFFD0BCFF)
-val PurpleGrey80 = Color(0xFFCCC2DC)
-val Pink80 = Color(0xFFEFB8C8)
+val TextPrimary = Color(0xFF0F172A)    // Deep Obsidian High-contrast text
+val TextSecondary = Color(0xFF475569)  // Steel Muted Slate text
+val OutlineVariantColor = Color(0xFFE2E8F0) // Elegant Platinum thin borders
 
-val Purple40 = Color(0xFF6650a4)
-val PurpleGrey40 = Color(0xFF625b71)
-val Pink40 = Color(0xFF7D5260)
-
+// Legacy compatibility values (mapped to light mode equivalents to avoid compilation errors)
+val DarkBg = LightBg
+val DarkCard = LightCard
